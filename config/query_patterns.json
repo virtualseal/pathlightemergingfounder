@@ -1,0 +1,12 @@
+[
+  "site:linkedin.com/in \"ex-{company}\" \"stealth\"",
+  "site:linkedin.com/in \"ex-{company}\" \"building\"",
+  "site:linkedin.com/in \"ex-{company}\" \"exploring\"",
+  "site:linkedin.com/in \"ex-{company}\" \"something new\"",
+  "site:linkedin.com/in \"former {company}\" \"building\"",
+  "site:linkedin.com/in \"former {company}\" \"stealth\"",
+  "site:linkedin.com/in \"{company}\" \"staff engineer\" \"3 years\"",
+  "site:linkedin.com/in \"{company}\" \"senior software engineer\" \"4 years\"",
+  "site:linkedin.com/in \"{company}\" \"product lead\" \"4 years\"",
+  "site:linkedin.com/in \"{company}\" \"senior product manager\" \"4 years\""
+]

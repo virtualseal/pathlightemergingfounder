@@ -1,0 +1,7 @@
+.env.local
+data/
+__pycache__/
+*.pyc
+.playwright-mcp/
+.linkedin-browser-profile/
+node_modules/

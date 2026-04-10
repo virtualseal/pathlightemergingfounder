@@ -1,0 +1,12 @@
+{
+  "name": "emerging-founder-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate:linkedin": "node scripts/linkedin_validate.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.51.0"
+  }
+}
