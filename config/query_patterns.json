@@ -1,12 +1,27 @@
-[
-  "site:linkedin.com/in \"ex-{company}\" \"stealth\"",
-  "site:linkedin.com/in \"ex-{company}\" \"building\"",
-  "site:linkedin.com/in \"ex-{company}\" \"exploring\"",
-  "site:linkedin.com/in \"ex-{company}\" \"something new\"",
-  "site:linkedin.com/in \"former {company}\" \"building\"",
-  "site:linkedin.com/in \"former {company}\" \"stealth\"",
-  "site:linkedin.com/in \"{company}\" \"staff engineer\" \"3 years\"",
-  "site:linkedin.com/in \"{company}\" \"senior software engineer\" \"4 years\"",
-  "site:linkedin.com/in \"{company}\" \"product lead\" \"4 years\"",
-  "site:linkedin.com/in \"{company}\" \"senior product manager\" \"4 years\""
-]
+{
+  "transition": [
+    "site:linkedin.com/in \"ex-{company}\" \"building something new\"",
+    "site:linkedin.com/in \"ex-{company}\" \"something new\"",
+    "site:linkedin.com/in \"ex-{company}\" \"stealth\"",
+    "site:linkedin.com/in \"ex-{company}\" \"exploring\"",
+    "site:linkedin.com/in \"former {company}\" \"building something new\"",
+    "site:linkedin.com/in \"former {company}\" \"something new\"",
+    "site:linkedin.com/in \"former {company}\" \"stealth\"",
+    "site:linkedin.com/in \"{company}\" \"on sabbatical\"",
+    "site:linkedin.com/in \"{company}\" \"independent\"",
+    "site:linkedin.com/in \"{company}\" \"angel investor\""
+  ],
+  "entrepreneurial": [
+    "site:linkedin.com/in \"ex-{company}\" \"zero to one\"",
+    "site:linkedin.com/in \"ex-{company}\" \"0 to 1\"",
+    "site:linkedin.com/in \"ex-{company}\" \"side project\"",
+    "site:linkedin.com/in \"ex-{company}\" \"advisor\" \"startup\"",
+    "site:linkedin.com/in \"former {company}\" \"angel investor\""
+  ],
+  "vesting": [
+    "site:linkedin.com/in \"{company}\" \"4 years\" \"building something new\"",
+    "site:linkedin.com/in \"{company}\" \"4 years\" \"zero to one\"",
+    "site:linkedin.com/in \"{company}\" \"4 years\" \"angel investor\"",
+    "site:linkedin.com/in \"{company}\" \"4 years\" \"advisor\" \"startup\""
+  ]
+}

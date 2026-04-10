@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { App } from "@slack/bolt";
+import { WebClient } from "@slack/web-api";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -30,8 +31,13 @@ const rejectEmoji = (process.env.SLACK_REJECT_EMOJI || "red_circle,red-x,x,red_x
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
-const approveStatus = process.env.NOTION_APPROVE_STATUS || "Approved";
+const watchlistEmoji = (process.env.SLACK_WATCHLIST_EMOJI || "eyes")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const approveStatus = process.env.NOTION_APPROVE_STATUS || "Passed";
 const rejectStatus = process.env.NOTION_REJECT_STATUS || "Rejected";
+const watchlistStatus = process.env.NOTION_WATCHLIST_STATUS || "Watchlist";
 const rejectionReasonActionId = "rejection_reason_selected";
 const rejectionReasons = [
   "Already a founder",
@@ -45,6 +51,11 @@ const rejectionReasons = [
   "Duplicate",
   "Other",
 ];
+
+if (process.argv.includes("--sync-existing")) {
+  await syncExistingReactions();
+  process.exit(0);
+}
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -79,7 +90,8 @@ app.event("reaction_added", async ({ event, client }) => {
   }
 
   console.log((result.stdout || "").trim());
-  await addReaction(client, item.channel, item.ts, status === approveStatus ? "white_check_mark" : "red_circle");
+  const confirmationEmoji = status === approveStatus ? "white_check_mark" : status === watchlistStatus ? "eyes" : "red_circle";
+  await addReaction(client, item.channel, item.ts, confirmationEmoji);
   if (status === rejectStatus) {
     await postRejectionReasonPicker(client, item.channel, item.ts, record);
   }
@@ -144,7 +156,59 @@ function statusForReaction(reaction) {
   if (rejectEmoji.includes(reaction)) {
     return rejectStatus;
   }
+  if (watchlistEmoji.includes(reaction)) {
+    return watchlistStatus;
+  }
   return "";
+}
+
+function statusForReactions(reactions = []) {
+  const names = reactions.map((reaction) => reaction.name).filter(Boolean);
+  for (const name of names) {
+    const status = statusForReaction(name);
+    if (status) {
+      return status;
+    }
+  }
+  return "";
+}
+
+function setNotionStatus(pageId, status) {
+  return spawnSync("python3", ["founder_scan.py", "--set-page-status", pageId, status], {
+    cwd: root,
+    env: process.env,
+    encoding: "utf8",
+  });
+}
+
+async function syncExistingReactions() {
+  const client = new WebClient(process.env.SLACK_BOT_TOKEN);
+  const sent = loadSent();
+  let updated = 0;
+  let skipped = 0;
+  for (const record of Object.values(sent.messages || {})) {
+    if (!record?.page_id || !record.channel || !record.ts) {
+      skipped += 1;
+      continue;
+    }
+    const response = await client.reactions.get({
+      channel: record.channel,
+      timestamp: record.ts,
+      full: true,
+    });
+    const status = statusForReactions(response.message?.reactions || []);
+    if (!status) {
+      skipped += 1;
+      continue;
+    }
+    const result = setNotionStatus(record.page_id, status);
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout || `Could not update ${record.page_id}`);
+    }
+    console.log((result.stdout || "").trim());
+    updated += 1;
+  }
+  console.log(`Reaction sync complete: updated=${updated} skipped=${skipped}`);
 }
 
 function loadSent() {

@@ -20,6 +20,7 @@ ENV_PATH = ROOT / ".env.local"
 EXA_CACHE_DIR = ROOT / "data" / "exa-cache"
 SLACK_SENT_PATH = ROOT / "data" / "slack-candidates.json"
 EVIDENCE_CHAR_LIMIT = 600
+SLACK_PENDING_STATUS = "Pending Pathlight Response"
 
 
 FOUNDER_TERMS = [
@@ -159,17 +160,6 @@ BIG_COMPANY_HEAVY_TERMS = [
     "ibm",
 ]
 
-PROMOTION_TERMS = [
-    "staff",
-    "principal",
-    "lead",
-    "manager",
-    "director",
-    "head of",
-    "vp",
-    "senior",
-]
-
 US_MARKERS = [
     "United States (US)",
     "United States",
@@ -243,7 +233,6 @@ class ScoreInput:
     function: str
     signal_types: list[str]
     tenure_months: int | None
-    promotion_signal: str
     evidence_text: str
     company_tier: int = 0
     status: str | None = None
@@ -624,16 +613,6 @@ def founder_score(score_input: ScoreInput) -> int:
         score += 12
     if "Vesting Window" in signal_types:
         score += 14
-    if "Fast Promotions" in signal_types:
-        score += 8
-
-    if score_input.promotion_signal == "High":
-        score += 8
-    elif score_input.promotion_signal == "Medium":
-        score += 4
-    elif score_input.promotion_signal == "Low":
-        score -= 4
-
     tenure = score_input.tenure_months
     if tenure is None:
         score -= 4
@@ -710,14 +689,6 @@ def score_result(result: SearchResult) -> Candidate | None:
     signal_types = ["Top Source Company"]
     if transition_signal:
         signal_types.append("Founder Language")
-    promotion_hits = sum(1 for term in PROMOTION_TERMS if term in lower)
-    if promotion_hits >= 2:
-        promotion_signal = "High"
-        signal_types.append("Fast Promotions")
-    elif promotion_hits == 1:
-        promotion_signal = "Medium"
-    else:
-        promotion_signal = "Unknown"
     if any(term in lower for term in ["left", "former", "ex-"]):
         signal_types.append("Recent Departure")
     if in_vesting_window:
@@ -732,7 +703,6 @@ def score_result(result: SearchResult) -> Candidate | None:
             function=function,
             signal_types=signal_types,
             tenure_months=tenure_months,
-            promotion_signal=promotion_signal,
             evidence_text=score_text,
             company_tier=result.company_tier,
         )
@@ -923,7 +893,6 @@ def notion_page_score_input(page: dict) -> ScoreInput:
         function=notion_select_name(properties.get("Function", {})),
         signal_types=notion_multi_select_names(properties.get("Signal Type", {})),
         tenure_months=notion_number(properties.get("Tenure Months", {})),
-        promotion_signal=notion_select_name(properties.get("Promotion Signal", {})),
         evidence_text=" ".join(part for part in evidence_parts if part),
         status=notion_select_name(properties.get("Status", {})),
     )
@@ -1312,7 +1281,7 @@ def slack_blocks_for_notion_page(page: dict) -> list[dict]:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "React with :white_check_mark: to approve or :red_circle: to reject.",
+                "text": "React with :white_check_mark: to pass, :red_circle: to reject, or :eyes: to watchlist.",
             },
         }
     )
@@ -1330,7 +1299,7 @@ def post_notion_page_to_slack(page: dict) -> dict:
     name = prop_title(page.get("properties", {}), "Name") or "Unknown candidate"
     body = {
         "channel": channel_id,
-        "text": f"New founder candidate: {name}. React with :white_check_mark: to approve or :red_circle: to reject.",
+        "text": f"New founder candidate: {name}. React with :white_check_mark: to pass, :red_circle: to reject, or :eyes: to watchlist.",
         "blocks": slack_blocks_for_notion_page(page),
         "unfurl_links": False,
         "unfurl_media": False,
@@ -1350,6 +1319,7 @@ def send_new_notion_pages_to_slack(*, resend: bool = False) -> tuple[int, int]:
     for page in pages:
         page_id = page["id"]
         if not resend and page_id in sent["pages"]:
+            update_status_by_page_id(page_id, SLACK_PENDING_STATUS)
             skipped += 1
             continue
         response = post_notion_page_to_slack(page)
@@ -1366,6 +1336,7 @@ def send_new_notion_pages_to_slack(*, resend: bool = False) -> tuple[int, int]:
         }
         sent["pages"][page_id] = record
         sent["messages"][slack_message_key(channel, ts)] = record
+        update_status_by_page_id(page_id, SLACK_PENDING_STATUS)
         posted += 1
     save_slack_sent(sent)
     return posted, skipped
