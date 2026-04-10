@@ -195,6 +195,22 @@ STEALTH_TERMS = ["stealth", "something new", "building"]
 REJECTED_STATUS = "Rejected"
 LOW_CONFIDENCE_MAX = 54
 MEDIUM_CONFIDENCE_MAX = 74
+REJECTION_REASON_PROPERTY = "Rejection Reason"
+REVIEWED_BY_PROPERTY = "Reviewed By"
+REVIEWED_AT_PROPERTY = "Reviewed At"
+REVIEW_SOURCE_PROPERTY = "Review Source"
+REJECTION_REASONS = [
+    "Already a founder",
+    "Not founder-like",
+    "Weak role/function",
+    "Too senior / established",
+    "Too junior",
+    "Wrong geography",
+    "Not enough evidence",
+    "Bad source/result",
+    "Duplicate",
+    "Other",
+]
 
 
 @dataclass
@@ -825,6 +841,43 @@ def rename_notion_property(old_name: str, new_name: str) -> bool:
     return True
 
 
+def ensure_review_properties() -> list[str]:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    database = retrieve_notion_database()
+    existing = database.get("properties", {})
+    properties = {}
+    if REJECTION_REASON_PROPERTY not in existing:
+        properties[REJECTION_REASON_PROPERTY] = {
+            "select": {
+                "options": [{"name": reason, "color": "default"} for reason in REJECTION_REASONS]
+            }
+        }
+    if REVIEWED_BY_PROPERTY not in existing:
+        properties[REVIEWED_BY_PROPERTY] = {"rich_text": {}}
+    if REVIEWED_AT_PROPERTY not in existing:
+        properties[REVIEWED_AT_PROPERTY] = {"date": {}}
+    if REVIEW_SOURCE_PROPERTY not in existing:
+        properties[REVIEW_SOURCE_PROPERTY] = {
+            "select": {
+                "options": [
+                    {"name": "Slack", "color": "purple"},
+                    {"name": "Manual", "color": "gray"},
+                ]
+            }
+        }
+    if not properties:
+        return []
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/databases/{database_id}",
+        method="PATCH",
+        body={"properties": properties},
+        headers=notion_headers(),
+    )
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion review property update failed status={status}: {text}")
+    return list(properties)
+
+
 def slack_headers() -> dict:
     return {
         "Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}",
@@ -1438,16 +1491,42 @@ def rescore_notion_database(*, apply: bool) -> list[dict]:
 
 
 def update_status_by_page_id(page_id: str, status_name: str) -> bool:
+    properties = {"Status": {"select": {"name": status_name}}}
+    if status_name == REJECTED_STATUS:
+        properties.update(notion_score_properties(0))
     status, text = fetch_url(
         f"https://api.notion.com/v1/pages/{page_id}",
         method="PATCH",
-        body={"properties": {"Status": {"select": {"name": status_name}}}},
+        body={"properties": properties},
         headers=notion_headers(),
     )
     if status == 404:
         return False
     if status not in (200, 201):
         raise RuntimeError(f"Notion status update failed status={status}: {text}")
+    return True
+
+
+def update_rejection_reason_by_page_id(page_id: str, reason: str, reviewed_by: str = "") -> bool:
+    if reason not in REJECTION_REASONS:
+        raise RuntimeError(f"unknown rejection reason: {reason}")
+    properties = {
+        REJECTION_REASON_PROPERTY: {"select": {"name": reason}},
+        REVIEWED_AT_PROPERTY: {"date": {"start": dt.datetime.now(dt.UTC).isoformat()}},
+        REVIEW_SOURCE_PROPERTY: {"select": {"name": "Slack"}},
+    }
+    if reviewed_by:
+        properties[REVIEWED_BY_PROPERTY] = notion_text(reviewed_by)
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        method="PATCH",
+        body={"properties": properties},
+        headers=notion_headers(),
+    )
+    if status == 404:
+        return False
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion rejection reason update failed status={status}: {text}")
     return True
 
 
@@ -1558,6 +1637,9 @@ def main() -> int:
     parser.add_argument("--remove-notion-property")
     parser.add_argument("--rename-notion-property", nargs=2, metavar=("OLD_NAME", "NEW_NAME"))
     parser.add_argument("--replace-select-value", nargs=3, metavar=("PROPERTY", "OLD_VALUE", "NEW_VALUE"))
+    parser.add_argument("--ensure-review-fields", action="store_true")
+    parser.add_argument("--set-rejection-reason", nargs=2, metavar=("PAGE_ID", "REASON"))
+    parser.add_argument("--reviewed-by", default="")
     parser.add_argument("--send-new-slack", action="store_true")
     parser.add_argument("--resend-slack", action="store_true")
     parser.add_argument("--rescore-notion", action="store_true")
@@ -1588,6 +1670,14 @@ def main() -> int:
         property_name, old_value, new_value = args.replace_select_value
         updated = replace_select_property_value(property_name, old_value, new_value)
         print(f"updated {updated}: {property_name} {old_value} -> {new_value}")
+        return 0
+
+    if args.ensure_review_fields:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        created = ensure_review_properties()
+        print(f"review fields {'created: ' + ', '.join(created) if created else 'already exist'}")
         return 0
 
     if args.rescore_notion:
@@ -1622,6 +1712,15 @@ def main() -> int:
         page_id, status_name = args.set_page_status
         updated = update_status_by_page_id(page_id, status_name)
         print(f"{'updated' if updated else 'not found'}: {page_id} -> {status_name}")
+        return 0
+
+    if args.set_rejection_reason:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        page_id, reason = args.set_rejection_reason
+        updated = update_rejection_reason_by_page_id(page_id, reason, reviewed_by=args.reviewed_by)
+        print(f"{'updated' if updated else 'not found'}: {page_id} rejection reason -> {reason}")
         return 0
 
     if args.send_new_slack:
