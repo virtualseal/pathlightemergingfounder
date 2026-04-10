@@ -30,8 +30,13 @@ const rejectEmoji = (process.env.SLACK_REJECT_EMOJI || "red_circle,red-x,x,red_x
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const watchlistEmoji = (process.env.SLACK_WATCHLIST_EMOJI || "eyes")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
 const approveStatus = process.env.NOTION_APPROVE_STATUS || "Approved";
 const rejectStatus = process.env.NOTION_REJECT_STATUS || "Rejected";
+const watchlistStatus = process.env.NOTION_WATCHLIST_STATUS || "Watchlist";
 const rejectionReasonActionId = "rejection_reason_selected";
 const rejectionReasons = [
   "Already a founder",
@@ -79,7 +84,8 @@ app.event("reaction_added", async ({ event, client }) => {
   }
 
   console.log((result.stdout || "").trim());
-  await addReaction(client, item.channel, item.ts, status === approveStatus ? "white_check_mark" : "red_circle");
+  const confirmationEmoji = status === approveStatus ? "white_check_mark" : status === watchlistStatus ? "eyes" : "red_circle";
+  await addReaction(client, item.channel, item.ts, confirmationEmoji);
   if (status === rejectStatus) {
     await postRejectionReasonPicker(client, item.channel, item.ts, record);
   }
@@ -143,6 +149,9 @@ function statusForReaction(reaction) {
   }
   if (rejectEmoji.includes(reaction)) {
     return rejectStatus;
+  }
+  if (watchlistEmoji.includes(reaction)) {
+    return watchlistStatus;
   }
   return "";
 }

@@ -78,13 +78,15 @@ Before using Slack rejection reasons, make sure the Notion review fields exist:
 python3 founder_scan.py --ensure-review-fields
 ```
 
-By default, `:white_check_mark:` sets `Status` to `Approved`, and `:red_circle:` sets `Status` to `Rejected`. After a rejection, the Slack bot replies in-thread with a rejection reason picklist and writes the selected reason to Notion. Override the status and emoji names with:
+By default, `:white_check_mark:` sets `Status` to `Approved`, `:red_circle:` sets `Status` to `Rejected`, and `:eyes:` sets `Status` to `Watchlist`. After a rejection, the Slack bot replies in-thread with a rejection reason picklist and writes the selected reason to Notion. Override the status and emoji names with:
 
 ```env
 NOTION_APPROVE_STATUS=Approved
 NOTION_REJECT_STATUS=Rejected
+NOTION_WATCHLIST_STATUS=Watchlist
 SLACK_APPROVE_EMOJI=white_check_mark
 SLACK_REJECT_EMOJI=red_circle,red-x,x,red_x,negative_squared_cross_mark
+SLACK_WATCHLIST_EMOJI=eyes
 ```
 
 Credit-efficient discovery:
