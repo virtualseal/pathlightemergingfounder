@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "slack:listen": "node scripts/slack_reactions.mjs",
     "validate:linkedin": "node scripts/linkedin_validate.mjs"
   },
   "dependencies": {
+    "@slack/bolt": "^4.7.0",
     "playwright": "^1.51.0"
   }
 }

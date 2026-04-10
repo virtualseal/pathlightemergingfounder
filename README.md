@@ -12,6 +12,9 @@ NOTION_DATABASE_ID=33ec925dab6a80029a3de6273506220a
 EXA_API_KEY=your_exa_key
 # Optional alternative/fallback:
 BRAVE_SEARCH_API_KEY=your_brave_key
+SLACK_BOT_TOKEN=xoxb-your_slack_bot_token
+SLACK_APP_TOKEN=xapp-your_slack_socket_mode_token
+SLACK_CHANNEL_ID=C012ABCDEF
 ```
 
 Run:
@@ -50,6 +53,62 @@ Apply updated Notion scores:
 ```bash
 python3 founder_scan.py --rescore-notion --apply-rescore
 ```
+
+Send every Notion candidate with `Status = New` to Slack:
+
+```bash
+python3 founder_scan.py --send-new-slack
+```
+
+The Slack message includes the candidate details, evidence, and profile links at the end. It only sends each Notion page once unless you force a resend:
+
+```bash
+python3 founder_scan.py --send-new-slack --resend-slack
+```
+
+Listen for Slack emoji reactions and update the Notion `Status`:
+
+```bash
+npm run slack:listen
+```
+
+By default, `:white_check_mark:` sets `Status` to `Approved`, and `:red_circle:` sets `Status` to `Rejected`. Override those with:
+
+```env
+NOTION_APPROVE_STATUS=Approved
+NOTION_REJECT_STATUS=Rejected
+SLACK_APPROVE_EMOJI=white_check_mark
+SLACK_REJECT_EMOJI=red_circle,red-x,x,red_x,negative_squared_cross_mark
+```
+
+Credit-efficient discovery:
+
+```bash
+python3 founder_scan.py \
+  --provider exa \
+  --query-mode all \
+  --max-queries 30 \
+  --stop-after-candidates 15 \
+  --per-company 2 \
+  --limit 10 \
+  --skip-existing-notion \
+  --output-json data/candidates.json \
+  --verbose
+```
+
+Use only high-intent transition queries:
+
+```bash
+python3 founder_scan.py --provider exa --query-mode transition --max-queries 20 --stop-after-candidates 10 --limit 10
+```
+
+Use only vesting-window queries for tier-3 source companies:
+
+```bash
+python3 founder_scan.py --provider exa --query-mode vesting --max-queries 20 --stop-after-candidates 10 --limit 10
+```
+
+Exa responses are cached in `data/exa-cache/` by default so scoring changes can be tested without re-spending credits. Use `--no-cache` to force fresh search results.
 
 ## Optional LinkedIn Validation
 

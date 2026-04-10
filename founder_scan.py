@@ -9,6 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -16,6 +17,9 @@ ROOT = Path(__file__).resolve().parent
 COMPANIES_PATH = ROOT / "config" / "companies.json"
 QUERY_PATTERNS_PATH = ROOT / "config" / "query_patterns.json"
 ENV_PATH = ROOT / ".env.local"
+EXA_CACHE_DIR = ROOT / "data" / "exa-cache"
+SLACK_SENT_PATH = ROOT / "data" / "slack-candidates.json"
+EVIDENCE_CHAR_LIMIT = 600
 
 
 FOUNDER_TERMS = [
@@ -54,9 +58,14 @@ ROLE_TERMS = [
     "ml",
     "ai",
     "growth",
+    "compliance",
+    "partnership",
+    "partnerships",
+    "strategy",
+    "operations",
 ]
 
-STRONG_FUNCTIONS = {"Engineering", "Product", "Data/AI", "Design"}
+STRONG_FUNCTIONS = {"Engineering", "Product", "Data/AI", "Design", "Growth/GTM", "Other"}
 
 WEAK_ROLE_TERMS = [
     "account manager",
@@ -92,6 +101,28 @@ STARTUP_SIGNAL_TERMS = [
     "early employee",
 ]
 
+ENTREPRENEURIAL_SIGNAL_TERMS = [
+    "zero to one",
+    "0 to 1",
+    "built from scratch",
+    "launched",
+    "side project",
+    "angel investor",
+    "advisor",
+    "startup",
+    "ventures",
+    "entrepreneur",
+    "entrepreneurial",
+    "creator",
+    "open source",
+    "patent",
+    "first engineer",
+    "founding engineer",
+    "new business",
+    "new product",
+    "new market",
+]
+
 EXCLUSION_TERMS = [
     "fractional head",
     "fractional",
@@ -100,6 +131,15 @@ EXCLUSION_TERMS = [
     "consultant",
     "agency",
     "advisor to founders",
+    "gtm leader",
+    "head of partnerships",
+    "head of product partnerships",
+    "product partnerships",
+    "strategic partnerships",
+    "partnerships lead",
+    "eir",
+    "executive in residence",
+    "venture capital",
 ]
 
 CURRENT_STARTUP_EMPLOYEE_TERMS = [
@@ -177,9 +217,7 @@ class Candidate:
     function: str
     signal_types: list[str]
     tenure_months: int | None
-    promotion_signal: str
     score: int
-    confidence: str
     evidence: str
     source: str
 
@@ -203,7 +241,15 @@ def load_env(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+        if value.startswith("xapp-"):
+            os.environ.setdefault("SLACK_APP_TOKEN", value)
+        elif value.startswith("xoxb-"):
+            os.environ.setdefault("SLACK_BOT_TOKEN", value)
+        elif "channel" in key.lower() and re.match(r"^[CG][A-Z0-9]+$", value):
+            os.environ.setdefault("SLACK_CHANNEL_ID", value)
 
 
 def load_json(path: Path):
@@ -236,10 +282,20 @@ def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def search_exa(query: str, company: str, company_tier: int, max_results: int = 5) -> list[SearchResult]:
+def cache_path_for_query(provider: str, query: str) -> Path:
+    digest = sha256(f"{provider}:{query}".encode("utf-8")).hexdigest()
+    return EXA_CACHE_DIR / f"{digest}.json"
+
+
+def search_exa(query: str, company: str, company_tier: int, max_results: int = 3, use_cache: bool = True) -> list[SearchResult]:
     key = get_exa_key()
     if not key:
         return []
+    cache_path = cache_path_for_query("exa", query)
+    if use_cache and cache_path.exists():
+        payload = json.loads(cache_path.read_text())
+        return search_results_from_exa_payload(payload, query, company, company_tier)
+
     body = {
         "query": query,
         "numResults": max_results,
@@ -257,6 +313,13 @@ def search_exa(query: str, company: str, company_tier: int, max_results: int = 5
         print(f"exa search failed status={status} query={query}: {text[:300]}", file=sys.stderr)
         return []
     payload = json.loads(text)
+    if use_cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload, indent=2))
+    return search_results_from_exa_payload(payload, query, company, company_tier)
+
+
+def search_results_from_exa_payload(payload: dict, query: str, company: str, company_tier: int) -> list[SearchResult]:
     results = []
     for item in payload.get("results", []):
         title = normalize_text(item.get("title", ""))
@@ -268,7 +331,7 @@ def search_exa(query: str, company: str, company_tier: int, max_results: int = 5
     return results
 
 
-def search_brave(query: str, company: str, company_tier: int, max_results: int = 5) -> list[SearchResult]:
+def search_brave(query: str, company: str, company_tier: int, max_results: int = 3) -> list[SearchResult]:
     key = get_brave_key()
     if not key:
         return []
@@ -300,13 +363,13 @@ def search_brave(query: str, company: str, company_tier: int, max_results: int =
     return results
 
 
-def search_provider(query: str, company: str, company_tier: int, max_results: int = 5, provider: str = "auto") -> list[SearchResult]:
+def search_provider(query: str, company: str, company_tier: int, max_results: int = 3, provider: str = "auto", use_cache: bool = True) -> list[SearchResult]:
     if provider == "exa":
-        return search_exa(query, company, company_tier, max_results)
+        return search_exa(query, company, company_tier, max_results, use_cache=use_cache)
     if provider == "brave":
         return search_brave(query, company, company_tier, max_results)
     if get_exa_key():
-        return search_exa(query, company, company_tier, max_results)
+        return search_exa(query, company, company_tier, max_results, use_cache=use_cache)
     if get_brave_key():
         return search_brave(query, company, company_tier, max_results)
     raise RuntimeError("No search provider configured. Add EXA_API_KEY/EXA_API or BRAVE_SEARCH_API_KEY to .env.local.")
@@ -320,6 +383,8 @@ def infer_name(title: str) -> str:
 
 def infer_function(text: str) -> str:
     lower = text.lower()
+    if any(term in lower for term in ["compliance", "product compliance", "legal"]):
+        return "Product"
     if any(term in lower for term in ["product", " pm ", "product manager"]):
         return "Product"
     if any(term in lower for term in ["engineer", "engineering", "software", "developer"]):
@@ -414,8 +479,19 @@ def has_weak_role(text: str) -> bool:
     return any(term in lower for term in WEAK_ROLE_TERMS)
 
 
-def has_exclusion_term(text: str) -> bool:
+def has_exclusion_term(text: str, *, transition_signal: bool = False) -> bool:
     header = text[:600].lower()
+    if transition_signal:
+        allowed_with_transition = [
+            "partnerships lead",
+            "strategic partnerships",
+            "head of partnerships",
+            "head of product partnerships",
+            "product partnerships",
+            "business development",
+        ]
+        reduced_terms = [term for term in EXCLUSION_TERMS if term not in allowed_with_transition]
+        return any(term in header for term in reduced_terms)
     return any(term in header for term in EXCLUSION_TERMS)
 
 
@@ -424,10 +500,22 @@ def has_startup_signal(text: str) -> bool:
     return any(term in lower for term in STARTUP_SIGNAL_TERMS)
 
 
+def has_entrepreneurial_signal(text: str) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in ENTREPRENEURIAL_SIGNAL_TERMS)
+
+
+def has_big_company_terms(text: str) -> bool:
+    lower = text.lower()
+    source_hits = sum(1 for term in BIG_COMPANY_HEAVY_TERMS if term in lower)
+    public_company_or_large = "public company" in lower or "10,001+ employees" in lower or "5001-10,000 employees" in lower
+    return source_hits >= 1 or public_company_or_large
+
+
 def is_big_company_heavy_without_startup_signal(text: str) -> bool:
     lower = text.lower()
     big_company_hits = sum(1 for term in BIG_COMPANY_HEAVY_TERMS if term in lower)
-    return big_company_hits >= 2 and not has_startup_signal(text)
+    return big_company_hits >= 2 and not (has_startup_signal(text) or has_entrepreneurial_signal(text))
 
 
 def has_transition_signal(text: str) -> bool:
@@ -476,6 +564,11 @@ def is_named_current_founder(text: str, current_company: str) -> bool:
         return False
     company = current_company.lower()
     is_stealth = any(term in company or term in text.lower() for term in STEALTH_TERMS)
+    is_generic_startup = "startup" in company and "stealth" not in company
+    if is_generic_startup:
+        months = infer_current_founder_months(text)
+        early_unnamed = months is not None and months <= 12 and has_transition_signal(text)
+        return not early_unnamed
     return not is_stealth
 
 
@@ -564,12 +657,6 @@ def score_result(result: SearchResult) -> Candidate | None:
     function = infer_function(text)
     if function not in STRONG_FUNCTIONS:
         return None
-    if has_exclusion_term(text):
-        return None
-    if has_weak_role(text) and function not in {"Engineering", "Product", "Data/AI"}:
-        return None
-    if is_big_company_heavy_without_startup_signal(text):
-        return None
 
     current_company = infer_current_company(text)
     if is_named_current_founder(text, current_company):
@@ -581,6 +668,15 @@ def score_result(result: SearchResult) -> Candidate | None:
     tenure_months = infer_tenure_months(text, result.company)
     in_vesting_window = bool(tenure_months and 39 <= tenure_months <= 60)
     transition_signal = has_transition_signal(text)
+    startup_signal = has_startup_signal(text)
+    entrepreneurial_signal = has_entrepreneurial_signal(text)
+    big_company_profile = has_big_company_terms(text)
+    if has_exclusion_term(text, transition_signal=transition_signal):
+        return None
+    if has_weak_role(text) and function not in {"Engineering", "Product", "Data/AI"} and not transition_signal:
+        return None
+    if is_big_company_heavy_without_startup_signal(text) and not transition_signal:
+        return None
     if transition_signal_is_about_current_employer(text, current_company):
         return None
     current_months = current_role_tenure_months(text)
@@ -588,7 +684,11 @@ def score_result(result: SearchResult) -> Candidate | None:
         return None
     if not has_company_signal:
         return None
-    if not (transition_signal or in_vesting_window):
+    if not (transition_signal or startup_signal or entrepreneurial_signal or in_vesting_window):
+        return None
+    if in_vesting_window and big_company_profile and not (transition_signal or startup_signal or entrepreneurial_signal):
+        return None
+    if big_company_profile and not (transition_signal or startup_signal or entrepreneurial_signal):
         return None
 
     signal_types = ["Top Source Company"]
@@ -635,15 +735,14 @@ def score_result(result: SearchResult) -> Candidate | None:
 
     if has_weak_role(text):
         score -= 25
-    if has_startup_signal(text):
+    if startup_signal:
         score += 8
+    if big_company_profile and not transition_signal:
+        score -= 25
 
     score = max(0, min(score, 100))
     if score < 55:
         return None
-    confidence = confidence_for_score(score)
-
-    source = "LinkedIn" if "linkedin.com/in" in result.url else result.source
     title = infer_title(text)
 
     return Candidate(
@@ -654,11 +753,9 @@ def score_result(result: SearchResult) -> Candidate | None:
         function=function,
         signal_types=dedupe(signal_types),
         tenure_months=tenure_months,
-        promotion_signal=promotion_signal,
         score=score,
-        confidence=confidence,
-        evidence=evidence[:1900],
-        source=source,
+        evidence=evidence[:EVIDENCE_CHAR_LIMIT],
+        source=result.source,
     )
 
 
@@ -681,6 +778,56 @@ def notion_headers() -> dict:
     return {
         "Authorization": f"Bearer {token}",
         "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+
+def retrieve_notion_database() -> dict:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/databases/{database_id}",
+        headers=notion_headers(),
+    )
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion database fetch failed status={status}: {text}")
+    return json.loads(text)
+
+
+def remove_notion_property(property_name: str) -> bool:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    database = retrieve_notion_database()
+    if property_name not in database.get("properties", {}):
+        return False
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/databases/{database_id}",
+        method="PATCH",
+        body={"properties": {property_name: None}},
+        headers=notion_headers(),
+    )
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion property removal failed status={status}: {text}")
+    return True
+
+
+def rename_notion_property(old_name: str, new_name: str) -> bool:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    database = retrieve_notion_database()
+    if old_name not in database.get("properties", {}):
+        return False
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/databases/{database_id}",
+        method="PATCH",
+        body={"properties": {old_name: {"name": new_name}}},
+        headers=notion_headers(),
+    )
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion property rename failed status={status}: {text}")
+    return True
+
+
+def slack_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}",
         "Content-Type": "application/json",
     }
 
@@ -732,12 +879,11 @@ def notion_page_score_input(page: dict) -> ScoreInput:
 def notion_score_properties(score: int) -> dict:
     return {
         "Score": {"number": score},
-        "Confidence": {"select": {"name": confidence_for_score(score)}},
         "Last Checked": {"date": {"start": dt.date.today().isoformat()}},
     }
 
 
-def notion_candidate_properties(candidate: Candidate, *, include_status: bool) -> dict:
+def notion_candidate_properties(candidate: Candidate, *, include_status: bool, status_name: str = "New") -> dict:
     properties = {
         "Name": {"title": [{"text": {"content": candidate.name}}]},
         "LinkedIn URL": {"url": candidate.linkedin_url or None},
@@ -745,15 +891,13 @@ def notion_candidate_properties(candidate: Candidate, *, include_status: bool) -
         "Current Title": notion_text(candidate.current_title),
         "Function": {"select": {"name": candidate.function}},
         "Signal Type": {"multi_select": [{"name": item} for item in candidate.signal_types]},
-        "Promotion Signal": {"select": {"name": candidate.promotion_signal}},
         "Score": {"number": candidate.score},
-        "Confidence": {"select": {"name": candidate.confidence}},
         "Evidence": notion_text(candidate.evidence),
         "Last Checked": {"date": {"start": dt.date.today().isoformat()}},
-        "Source": {"select": {"name": candidate.source}},
+        "API": {"select": {"name": candidate.source}},
     }
     if include_status:
-        properties["Status"] = {"select": {"name": "New"}}
+        properties["Status"] = {"select": {"name": status_name}}
     if candidate.tenure_months is not None:
         properties["Tenure Months"] = {"number": candidate.tenure_months}
     return properties
@@ -796,6 +940,384 @@ def find_notion_page_by_linkedin_url(linkedin_url: str) -> str | None:
     return results[0]["id"] if results else None
 
 
+def query_notion_pages_by_status(status_name: str) -> list[dict]:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    pages: list[dict] = []
+    body: dict = {
+        "filter": {
+            "property": "Status",
+            "select": {
+                "equals": status_name,
+            },
+        },
+        "page_size": 100,
+    }
+    while True:
+        status, text = fetch_url(
+            f"https://api.notion.com/v1/databases/{database_id}/query",
+            method="POST",
+            body=body,
+            headers=notion_headers(),
+        )
+        if status not in (200, 201):
+            raise RuntimeError(f"Notion query failed status={status}: {text}")
+        payload = json.loads(text)
+        pages.extend(payload.get("results", []))
+        if not payload.get("has_more"):
+            return pages
+        body["start_cursor"] = payload["next_cursor"]
+
+
+def page_id_slug(page_id: str) -> str:
+    return page_id.replace("-", "")
+
+
+def plain_text(items: list[dict]) -> str:
+    return "".join(item.get("plain_text", "") for item in items)
+
+
+def prop_title(properties: dict, name: str) -> str:
+    return plain_text(properties.get(name, {}).get("title", []))
+
+
+def prop_rich_text(properties: dict, name: str) -> str:
+    return plain_text(properties.get(name, {}).get("rich_text", []))
+
+
+def prop_select(properties: dict, name: str) -> str:
+    select = properties.get(name, {}).get("select")
+    return select.get("name", "") if select else ""
+
+
+def query_all_notion_pages() -> list[dict]:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    pages: list[dict] = []
+    body: dict = {"page_size": 100}
+    while True:
+        status, text = fetch_url(
+            f"https://api.notion.com/v1/databases/{database_id}/query",
+            method="POST",
+            body=body,
+            headers=notion_headers(),
+        )
+        if status not in (200, 201):
+            raise RuntimeError(f"Notion query failed status={status}: {text}")
+        payload = json.loads(text)
+        pages.extend(payload.get("results", []))
+        if not payload.get("has_more"):
+            return pages
+        body["start_cursor"] = payload["next_cursor"]
+
+
+def update_select_property_by_page_id(page_id: str, property_name: str, value: str) -> None:
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        method="PATCH",
+        body={"properties": {property_name: {"select": {"name": value}}}},
+        headers=notion_headers(),
+    )
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion select update failed status={status}: {text}")
+
+
+def replace_select_property_value(property_name: str, old_value: str, new_value: str) -> int:
+    updated = 0
+    for page in query_all_notion_pages():
+        if prop_select(page.get("properties", {}), property_name) != old_value:
+            continue
+        update_select_property_by_page_id(page["id"], property_name, new_value)
+        updated += 1
+    return updated
+
+
+def prop_multi_select(properties: dict, name: str) -> list[str]:
+    return [item.get("name", "") for item in properties.get(name, {}).get("multi_select", []) if item.get("name")]
+
+
+def prop_number(properties: dict, name: str) -> int | float | None:
+    return properties.get(name, {}).get("number")
+
+
+def prop_url(properties: dict, name: str) -> str:
+    return properties.get(name, {}).get("url") or ""
+
+
+def notion_page_url(page: dict) -> str:
+    return page.get("url") or f"https://www.notion.so/{page_id_slug(page['id'])}"
+
+
+def slack_escape(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def clean_profile_text(value: str) -> str:
+    value = re.sub(r"\s+", " ", value or "").strip()
+    value = re.sub(r"^Public evidence:\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b[\d,]+\s+connections?\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b[\d,]+\s+followers?\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s*[•|]\s*", " ", value)
+    return re.sub(r"\s+", " ", value).strip(" -|")
+
+
+def clean_title(value: str, company: str = "") -> str:
+    value = clean_profile_text(value)
+    value = re.split(r"\b(?:New York|San Francisco|Bay Area|Los Angeles|Seattle|Boston|Austin|Miami|Chicago|United States)\b", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    value = re.split(r"\b(?:About|Experience|Education)\b", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    if company:
+        value = re.sub(rf"\s+(?:at|@)\s+{re.escape(company)}.*$", "", value, flags=re.IGNORECASE)
+    return value.strip(" -|") or "Unknown"
+
+
+def sentence_case(value: str) -> str:
+    value = value.strip()
+    return value[:1].upper() + value[1:] if value else value
+
+
+def extract_about_text(raw_evidence: str) -> str:
+    match = re.search(r"##\s+About\s+(.*?)(?:Total Experience:|##\s+Experience|###|Source query:)", raw_evidence, re.IGNORECASE)
+    if not match:
+        return ""
+    about = clean_profile_text(match.group(1))
+    about = re.sub(r"^Based in [^,]+,\s*", "", about, flags=re.IGNORECASE)
+    return about.strip()
+
+
+def concise_about_text(about: str) -> str:
+    about = about.rstrip(" .")
+    if "Portico" in about and "publishers" in about and "subscription" in about and "ad" in about:
+        return "working on Portico, a paid-revenue product for online publishers trying to move beyond subscriptions and ads"
+    return about
+
+
+def concise_previous_text(previous: str) -> str:
+    previous = previous.rstrip(" .")
+    if "Figma" in previous and "Community" in previous and "code splitting" in previous:
+        return "previously worked on Figma's Community product and code-splitting/performance"
+    return previous
+
+
+def extract_experience_sections(raw_evidence: str) -> list[dict]:
+    sections = []
+    pattern = re.compile(
+        r"###\s+(?P<title>.*?)\s+at\s+(?P<company>.*?)\s+"
+        r"(?P<dates>(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s+-\s+.*?)(?=###|Source query:|$)",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(raw_evidence):
+        body = clean_profile_text(match.group(0))
+        company = clean_profile_text(match.group("company"))
+        title = clean_profile_text(match.group("title"))
+        description = ""
+        dept_split = re.split(r"\bDepartment:", body, maxsplit=1, flags=re.IGNORECASE)[0]
+        company_split = re.split(r"\bCompany:", dept_split, maxsplit=1, flags=re.IGNORECASE)
+        if len(company_split) > 1:
+            description = clean_profile_text(company_split[1])
+            service_split = re.split(r"\b(?:Research Services|Design Services|Software Development|Internet Publishing)\b", description, maxsplit=1, flags=re.IGNORECASE)
+            description = clean_profile_text(service_split[1]) if len(service_split) > 1 else ""
+        sections.append({"title": title, "company": company, "description": description})
+    return sections
+
+
+def extract_previous_experience_text(raw_evidence: str, current_company: str) -> str:
+    for section in extract_experience_sections(raw_evidence):
+        company = section["company"]
+        if current_company and current_company.lower() in company.lower():
+            continue
+        description = section["description"]
+        if description:
+            return f"Previously at {company}, {description}"
+        return f"Previously {section['title']} at {company}"
+    return ""
+
+
+def extract_external_urls(raw_evidence: str) -> list[str]:
+    urls = re.findall(r"https?://[^\s)>]+", raw_evidence)
+    output = []
+    for url in urls:
+        clean_url = url.rstrip(".,")
+        if any(domain in clean_url for domain in ("linkedin.com", "notion.so")):
+            continue
+        if clean_url not in output:
+            output.append(clean_url)
+    return output
+
+
+def candidate_reason(properties: dict) -> str:
+    name = prop_title(properties, "Name")
+    company = prop_rich_text(properties, "Current Company")
+    title = clean_title(prop_rich_text(properties, "Current Title"), company)
+    score = prop_number(properties, "Score")
+    signals = prop_multi_select(properties, "Signal Type")
+    raw_evidence = clean_profile_text(prop_rich_text(properties, "Evidence"))
+    if raw_evidence and not raw_evidence.startswith("#") and "##" not in raw_evidence and "Source query:" not in raw_evidence:
+        return raw_evidence[:EVIDENCE_CHAR_LIMIT].rsplit(" ", 1)[0].rstrip(" .,") + "."
+    about = concise_about_text(extract_about_text(raw_evidence))
+    previous = concise_previous_text(extract_previous_experience_text(raw_evidence, company))
+
+    role = ""
+    if title != "Unknown" and company:
+        role = f"{title} at {company}"
+    elif company:
+        role = f"someone currently at {company}"
+
+    concrete = []
+    if about:
+        concrete.append(f"{name or 'Their profile'} says they are {about.rstrip(' .')}")
+    if previous:
+        concrete.append(sentence_case(previous))
+    if concrete:
+        summary = ". ".join(concrete)
+        if role:
+            summary = f"{summary}. Current role: {role}"
+        if len(summary) <= EVIDENCE_CHAR_LIMIT:
+            return summary.rstrip(" .,") + "."
+        summary = ". ".join(concrete)
+        if len(summary) <= EVIDENCE_CHAR_LIMIT:
+            return summary.rstrip(" .,") + "."
+        return summary[:EVIDENCE_CHAR_LIMIT].rsplit(" ", 1)[0].rstrip(" .,") + "."
+
+    opening = ""
+    if role:
+        opening = f"{role} looks worth a founder-oriented outreach"
+    else:
+        opening = "This person looks worth a founder-oriented outreach"
+
+    reasons = []
+    if "Top Source Company" in signals and company:
+        reasons.append(f"{company} is a high-signal source company")
+    if "Founder Language" in signals:
+        reasons.append("the result includes founder/building language")
+    if "Recent Departure" in signals:
+        reasons.append("there is a timely transition signal")
+    if "Vesting Window" in signals:
+        reasons.append("their tenure may fit a founder-transition window")
+
+    summary = f"{opening}. " + "; ".join(reasons)
+    if score is not None:
+        summary = f"{summary}. Score: {score}/100"
+    if len(summary) < 80 and raw_evidence:
+        summary = f"{summary}. Supporting text: {raw_evidence}"
+    if len(summary) <= EVIDENCE_CHAR_LIMIT:
+        return summary.rstrip(" .,") + "."
+
+    shorter_reasons = reasons[:3]
+    summary = f"{opening}. " + "; ".join(shorter_reasons)
+    if len(summary) <= EVIDENCE_CHAR_LIMIT:
+        return summary.rstrip(" .,") + "."
+    shorter_reasons = reasons[:2]
+    summary = f"{opening}. " + "; ".join(shorter_reasons)
+    if len(summary) <= EVIDENCE_CHAR_LIMIT:
+        return summary.rstrip(" .,") + "."
+    return summary[:EVIDENCE_CHAR_LIMIT].rsplit(" ", 1)[0].rstrip(" .,") + "."
+
+
+def load_slack_sent() -> dict:
+    if not SLACK_SENT_PATH.exists():
+        return {"pages": {}, "messages": {}}
+    payload = json.loads(SLACK_SENT_PATH.read_text())
+    payload.setdefault("pages", {})
+    payload.setdefault("messages", {})
+    return payload
+
+
+def save_slack_sent(payload: dict) -> None:
+    SLACK_SENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SLACK_SENT_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def slack_message_key(channel: str, ts: str) -> str:
+    return f"{channel}:{ts}"
+
+
+def slack_blocks_for_notion_page(page: dict) -> list[dict]:
+    properties = page.get("properties", {})
+    name = prop_title(properties, "Name") or "Unknown candidate"
+    linkedin_url = prop_url(properties, "LinkedIn URL")
+    current_company = prop_rich_text(properties, "Current Company")
+    current_title = clean_title(prop_rich_text(properties, "Current Title"), current_company)
+    score = prop_number(properties, "Score")
+    reason = candidate_reason(properties)
+    notion_url = notion_page_url(page)
+    external_urls = extract_external_urls(prop_rich_text(properties, "Evidence"))
+
+    lines = []
+    for label, value in (
+        ("Score", str(score) if score is not None else ""),
+        ("Company", current_company),
+        ("Title", current_title),
+    ):
+        if value:
+            lines.append(f"*{label}:* {slack_escape(value)}")
+
+    blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"New founder candidate: {name[:120]}"}}]
+    if lines:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+    if reason:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Why reach out:*\n{slack_escape(reason)}"}})
+    blocks.append(
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "React with :white_check_mark: to approve or :red_circle: to reject.",
+            },
+        }
+    )
+    profile_links = []
+    if linkedin_url:
+        profile_links.append(f"<{linkedin_url}|LinkedIn profile>")
+    profile_links.extend(f"<{url}|Personal/external link>" for url in external_urls[:2])
+    profile_links.append(f"<{notion_url}|Notion record>")
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Profile:*\n{chr(10).join(profile_links)}"}})
+    return blocks
+
+
+def post_notion_page_to_slack(page: dict) -> dict:
+    channel_id = os.environ["SLACK_CHANNEL_ID"]
+    name = prop_title(page.get("properties", {}), "Name") or "Unknown candidate"
+    body = {
+        "channel": channel_id,
+        "text": f"New founder candidate: {name}. React with :white_check_mark: to approve or :red_circle: to reject.",
+        "blocks": slack_blocks_for_notion_page(page),
+        "unfurl_links": False,
+        "unfurl_media": False,
+    }
+    status, text = fetch_url("https://slack.com/api/chat.postMessage", method="POST", body=body, headers=slack_headers())
+    payload = json.loads(text)
+    if status != 200 or not payload.get("ok"):
+        raise RuntimeError(f"Slack post failed status={status}: {text}")
+    return payload
+
+
+def send_new_notion_pages_to_slack(*, resend: bool = False) -> tuple[int, int]:
+    sent = load_slack_sent()
+    pages = query_notion_pages_by_status("New")
+    posted = 0
+    skipped = 0
+    for page in pages:
+        page_id = page["id"]
+        if not resend and page_id in sent["pages"]:
+            skipped += 1
+            continue
+        response = post_notion_page_to_slack(page)
+        channel = response["channel"]
+        ts = response["ts"]
+        record = {
+            "page_id": page_id,
+            "name": prop_title(page.get("properties", {}), "Name"),
+            "linkedin_url": prop_url(page.get("properties", {}), "LinkedIn URL"),
+            "notion_url": notion_page_url(page),
+            "channel": channel,
+            "ts": ts,
+            "sent_at": dt.datetime.now(dt.UTC).isoformat(),
+        }
+        sent["pages"][page_id] = record
+        sent["messages"][slack_message_key(channel, ts)] = record
+        posted += 1
+    save_slack_sent(sent)
+    return posted, skipped
+
+
 def load_existing_notion_linkedin_urls() -> set[str]:
     database_id = os.environ["NOTION_DATABASE_ID"]
     existing: set[str] = set()
@@ -820,10 +1342,10 @@ def load_existing_notion_linkedin_urls() -> set[str]:
         body["start_cursor"] = payload["next_cursor"]
 
 
-def write_candidate_to_notion(candidate: Candidate) -> str:
+def write_candidate_to_notion(candidate: Candidate, status_name: str = "New") -> str:
     database_id = os.environ["NOTION_DATABASE_ID"]
     existing_page_id = find_notion_page_by_linkedin_url(candidate.linkedin_url)
-    properties = notion_candidate_properties(candidate, include_status=not bool(existing_page_id))
+    properties = notion_candidate_properties(candidate, include_status=not bool(existing_page_id), status_name=status_name)
     if existing_page_id:
         existing_page = get_notion_page(existing_page_id)
         existing_status = notion_select_name(existing_page.get("properties", {}).get("Status", {}))
@@ -893,8 +1415,6 @@ def rescore_notion_database(*, apply: bool) -> list[dict]:
         score_input = notion_page_score_input(page)
         new_score = founder_score(score_input)
         old_score = notion_number(properties.get("Score", {}))
-        old_confidence = notion_select_name(properties.get("Confidence", {}))
-        new_confidence = confidence_for_score(new_score)
         name = notion_plain_text(properties.get("Name", {})) or page["id"]
         change = {
             "page_id": page["id"],
@@ -902,9 +1422,7 @@ def rescore_notion_database(*, apply: bool) -> list[dict]:
             "status": score_input.status,
             "old_score": old_score,
             "new_score": new_score,
-            "old_confidence": old_confidence,
-            "new_confidence": new_confidence,
-            "changed": old_score != new_score or old_confidence != new_confidence,
+            "changed": old_score != new_score,
         }
         changes.append(change)
         if apply and change["changed"]:
@@ -919,20 +1437,79 @@ def rescore_notion_database(*, apply: bool) -> list[dict]:
     return changes
 
 
-def discover(limit: int, per_company: int, provider: str, verbose: bool, excluded_urls: set[str] | None = None) -> list[Candidate]:
+def update_status_by_page_id(page_id: str, status_name: str) -> bool:
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        method="PATCH",
+        body={"properties": {"Status": {"select": {"name": status_name}}}},
+        headers=notion_headers(),
+    )
+    if status == 404:
+        return False
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion status update failed status={status}: {text}")
+    return True
+
+
+def candidate_from_row(row: dict) -> Candidate:
+    row = dict(row)
+    row.pop("confidence", None)
+    row.pop("promotion_signal", None)
+    return Candidate(**row)
+
+
+def selected_patterns(pattern_config: dict | list, mode: str, company_tier: int) -> list[tuple[str, str]]:
+    if isinstance(pattern_config, list):
+        return [("legacy", pattern) for pattern in pattern_config]
+    patterns: list[tuple[str, str]] = []
+    if mode in ("all", "transition"):
+        patterns.extend(("transition", pattern) for pattern in pattern_config.get("transition", []))
+    if mode in ("all", "entrepreneurial") and company_tier >= 2:
+        patterns.extend(("entrepreneurial", pattern) for pattern in pattern_config.get("entrepreneurial", []))
+    if mode in ("all", "vesting") and company_tier >= 3:
+        patterns.extend(("vesting", pattern) for pattern in pattern_config.get("vesting", []))
+    return patterns
+
+
+def discover(
+    limit: int,
+    per_company: int,
+    provider: str,
+    verbose: bool,
+    excluded_urls: set[str] | None = None,
+    query_mode: str = "all",
+    max_queries: int = 40,
+    max_queries_per_company: int = 4,
+    stop_after_candidates: int | None = None,
+    use_cache: bool = True,
+    results_per_query: int = 3,
+) -> list[Candidate]:
     companies = load_json(COMPANIES_PATH)
-    patterns = load_json(QUERY_PATTERNS_PATH)
+    pattern_config = load_json(QUERY_PATTERNS_PATH)
     candidates: list[Candidate] = []
     seen_urls = set()
     excluded_urls = excluded_urls or set()
+    queries_used = 0
+    target_pool_size = stop_after_candidates or limit * 2
 
     for company in companies:
         company_count = 0
-        for pattern in patterns:
+        company_queries = 0
+        for pattern_type, pattern in selected_patterns(pattern_config, query_mode, company["tier"]):
+            if queries_used >= max_queries:
+                if verbose:
+                    print(f"Query budget reached: {queries_used}/{max_queries}", file=sys.stderr)
+                break
+            if company_queries >= max_queries_per_company:
+                if verbose:
+                    print(f"{company['name']}: company query cap reached {company_queries}/{max_queries_per_company}", file=sys.stderr)
+                break
             query = pattern.format(company=company["name"])
-            results = search_provider(query, company["name"], company["tier"], provider=provider)
+            queries_used += 1
+            company_queries += 1
+            results = search_provider(query, company["name"], company["tier"], max_results=results_per_query, provider=provider, use_cache=use_cache)
             if verbose:
-                print(f"{company['name']}: {len(results)} results for {query}", file=sys.stderr)
+                print(f"{company['name']} [{pattern_type}] query {queries_used}/{max_queries}: {len(results)} results for {query}", file=sys.stderr)
             for result in results:
                 result_url = canonical_url(result.url)
                 if result_url in seen_urls or result_url in excluded_urls:
@@ -945,12 +1522,12 @@ def discover(limit: int, per_company: int, provider: str, verbose: bool, exclude
                 company_count += 1
                 if verbose:
                     print(f"  + {candidate.name} score={candidate.score}", file=sys.stderr)
-                if len(candidates) >= limit * 3 or company_count >= per_company:
+                if len(candidates) >= target_pool_size or company_count >= per_company:
                     break
-            if len(candidates) >= limit * 3 or company_count >= per_company:
+            if len(candidates) >= target_pool_size or company_count >= per_company:
                 break
             time.sleep(0.4)
-        if len(candidates) >= limit * 3:
+        if len(candidates) >= target_pool_size or queries_used >= max_queries:
             break
 
     candidates.sort(key=lambda item: item.score, reverse=True)
@@ -963,14 +1540,55 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--per-company", type=int, default=2)
     parser.add_argument("--provider", choices=["auto", "exa", "brave"], default="auto")
+    parser.add_argument("--query-mode", choices=["all", "transition", "entrepreneurial", "vesting"], default="all")
+    parser.add_argument("--max-queries", type=int, default=40)
+    parser.add_argument("--max-queries-per-company", type=int, default=4)
+    parser.add_argument("--stop-after-candidates", type=int)
+    parser.add_argument("--results-per-query", type=int, default=3)
+    parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--write-notion", action="store_true")
+    parser.add_argument("--default-status", default="New")
     parser.add_argument("--output-json")
+    parser.add_argument("--input-json")
+    parser.add_argument("--only-url", action="append", default=[])
     parser.add_argument("--skip-existing-notion", action="store_true")
     parser.add_argument("--set-status", nargs=2, metavar=("LINKEDIN_URL", "STATUS"))
+    parser.add_argument("--set-page-status", nargs=2, metavar=("PAGE_ID", "STATUS"))
+    parser.add_argument("--remove-notion-property")
+    parser.add_argument("--rename-notion-property", nargs=2, metavar=("OLD_NAME", "NEW_NAME"))
+    parser.add_argument("--replace-select-value", nargs=3, metavar=("PROPERTY", "OLD_VALUE", "NEW_VALUE"))
+    parser.add_argument("--send-new-slack", action="store_true")
+    parser.add_argument("--resend-slack", action="store_true")
     parser.add_argument("--rescore-notion", action="store_true")
     parser.add_argument("--apply-rescore", action="store_true")
     args = parser.parse_args()
+
+    if args.remove_notion_property:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        removed = remove_notion_property(args.remove_notion_property)
+        print(f"{'removed' if removed else 'not found'}: {args.remove_notion_property}")
+        return 0
+
+    if args.rename_notion_property:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        old_name, new_name = args.rename_notion_property
+        renamed = rename_notion_property(old_name, new_name)
+        print(f"{'renamed' if renamed else 'not found'}: {old_name} -> {new_name}")
+        return 0
+
+    if args.replace_select_value:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        property_name, old_value, new_value = args.replace_select_value
+        updated = replace_select_property_value(property_name, old_value, new_value)
+        print(f"updated {updated}: {property_name} {old_value} -> {new_value}")
+        return 0
 
     if args.rescore_notion:
         missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
@@ -997,6 +1615,23 @@ def main() -> int:
         print(f"{'updated' if updated else 'not found'}: {linkedin_url} -> {status_name}")
         return 0
 
+    if args.set_page_status:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        page_id, status_name = args.set_page_status
+        updated = update_status_by_page_id(page_id, status_name)
+        print(f"{'updated' if updated else 'not found'}: {page_id} -> {status_name}")
+        return 0
+
+    if args.send_new_slack:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID", "SLACK_BOT_TOKEN", "SLACK_CHANNEL_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        posted, skipped = send_new_notion_pages_to_slack(resend=args.resend_slack)
+        print(f"Slack sync complete: posted={posted} skipped={skipped}.")
+        return 0
+
     excluded_urls: set[str] = set()
     if args.skip_existing_notion:
         missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
@@ -1006,13 +1641,26 @@ def main() -> int:
         if args.verbose:
             print(f"Loaded {len(excluded_urls)} existing Notion LinkedIn URLs to skip.", file=sys.stderr)
 
-    candidates = discover(
-        limit=args.limit,
-        per_company=args.per_company,
-        provider=args.provider,
-        verbose=args.verbose,
-        excluded_urls=excluded_urls,
-    )
+    if args.input_json:
+        rows = json.loads(Path(args.input_json).read_text())
+        candidates = [candidate_from_row(row) for row in rows]
+    else:
+        candidates = discover(
+            limit=args.limit,
+            per_company=args.per_company,
+            provider=args.provider,
+            verbose=args.verbose,
+            excluded_urls=excluded_urls,
+            query_mode=args.query_mode,
+            max_queries=args.max_queries,
+            max_queries_per_company=args.max_queries_per_company,
+            stop_after_candidates=args.stop_after_candidates,
+            use_cache=not args.no_cache,
+            results_per_query=args.results_per_query,
+        )
+    if args.only_url:
+        allowed = {canonical_url(url) for url in args.only_url}
+        candidates = [candidate for candidate in candidates if canonical_url(candidate.linkedin_url) in allowed]
     candidate_rows = [candidate.__dict__ for candidate in candidates]
     print(json.dumps(candidate_rows, indent=2))
 
@@ -1028,7 +1676,7 @@ def main() -> int:
             raise RuntimeError(f"missing env values: {', '.join(missing)}")
         counts = {"created": 0, "updated": 0}
         for candidate in candidates:
-            action = write_candidate_to_notion(candidate)
+            action = write_candidate_to_notion(candidate, status_name=args.default_status)
             counts[action] += 1
         print(f"Notion sync complete: created={counts['created']} updated={counts['updated']}.")
     return 0
