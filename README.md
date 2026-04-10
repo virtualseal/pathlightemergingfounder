@@ -39,6 +39,18 @@ Skip candidates already in Notion:
 python3 founder_scan.py --provider exa --limit 10 --skip-existing-notion --write-notion
 ```
 
+Preview updated Notion scores without writing changes:
+
+```bash
+python3 founder_scan.py --rescore-notion
+```
+
+Apply updated Notion scores:
+
+```bash
+python3 founder_scan.py --rescore-notion --apply-rescore
+```
+
 ## Optional LinkedIn Validation
 
 After Exa finds candidates, run a small Playwright-assisted validation pass against visible LinkedIn profiles:
@@ -54,7 +66,8 @@ The validator uses a persistent local browser profile at `.linkedin-browser-prof
 
 - Uses Exa or Brave Search APIs, not logged-in LinkedIn or Sales Navigator scraping.
 - Searches for "ex-company", founder, stealth, and building signals.
-- Scores candidates with transparent rules.
+- Scores candidates with transparent rules across function, source-company signal, founder language, recent departure, vesting window, promotion signal, tenure, and weak-fit penalties.
+- Automatically scores rejected candidates as `0`.
 - Writes candidates and evidence to Notion.
 
 This is intentionally conservative. Strong candidates have public evidence URLs and profile text that supports the score.

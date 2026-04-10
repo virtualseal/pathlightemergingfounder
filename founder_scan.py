@@ -152,6 +152,10 @@ US_MARKERS = [
 
 STEALTH_TERMS = ["stealth", "something new", "building"]
 
+REJECTED_STATUS = "Rejected"
+LOW_CONFIDENCE_MAX = 54
+MEDIUM_CONFIDENCE_MAX = 74
+
 
 @dataclass
 class SearchResult:
@@ -178,6 +182,17 @@ class Candidate:
     confidence: str
     evidence: str
     source: str
+
+
+@dataclass
+class ScoreInput:
+    function: str
+    signal_types: list[str]
+    tenure_months: int | None
+    promotion_signal: str
+    evidence_text: str
+    company_tier: int = 0
+    status: str | None = None
 
 
 def load_env(path: Path) -> None:
@@ -464,6 +479,80 @@ def is_named_current_founder(text: str, current_company: str) -> bool:
     return not is_stealth
 
 
+def confidence_for_score(score: int) -> str:
+    if score <= LOW_CONFIDENCE_MAX:
+        return "Low"
+    if score <= MEDIUM_CONFIDENCE_MAX:
+        return "Medium"
+    return "High"
+
+
+def founder_score(score_input: ScoreInput) -> int:
+    status = (score_input.status or "").strip().lower()
+    if status == REJECTED_STATUS.lower():
+        return 0
+
+    signal_types = set(score_input.signal_types)
+    evidence = score_input.evidence_text.lower()
+    score = 25
+
+    function_weights = {
+        "Engineering": 16,
+        "Product": 14,
+        "Data/AI": 14,
+        "Design": 8,
+        "Growth/GTM": 3,
+        "Other": -20,
+    }
+    score += function_weights.get(score_input.function, -10)
+    score += min(max(score_input.company_tier, 0), 3) * 5
+
+    if "Top Source Company" in signal_types:
+        score += 12
+    if "Founder Language" in signal_types:
+        score += 18
+    if "Recent Departure" in signal_types:
+        score += 12
+    if "Vesting Window" in signal_types:
+        score += 14
+    if "Fast Promotions" in signal_types:
+        score += 8
+
+    if score_input.promotion_signal == "High":
+        score += 8
+    elif score_input.promotion_signal == "Medium":
+        score += 4
+    elif score_input.promotion_signal == "Low":
+        score -= 4
+
+    tenure = score_input.tenure_months
+    if tenure is None:
+        score -= 4
+    elif 39 <= tenure <= 60:
+        score += 16
+    elif 24 <= tenure < 39:
+        score += 6
+    elif 60 < tenure <= 84:
+        score += 4
+    elif tenure < 12:
+        score -= 14
+    elif tenure > 120:
+        score -= 20
+    elif tenure > 84:
+        score -= 10
+
+    if has_startup_signal(evidence):
+        score += 8
+    if has_weak_role(evidence):
+        score -= 25
+    if has_exclusion_term(evidence):
+        score -= 30
+    if is_big_company_heavy_without_startup_signal(evidence):
+        score -= 20
+
+    return max(0, min(score, 100))
+
+
 def score_result(result: SearchResult) -> Candidate | None:
     text = f"{result.title} {result.snippet}"
     lower = text.lower()
@@ -488,9 +577,6 @@ def score_result(result: SearchResult) -> Candidate | None:
     if current_role_is_small_startup_employee(text):
         return None
 
-    has_founder_signal = any(term in lower for term in FOUNDER_TERMS)
-    has_role_signal = any(term in lower for term in ROLE_TERMS)
-    has_source_signal = f"ex-{result.company.lower()}" in lower or f"former {result.company.lower()}" in lower
     has_company_signal = result.company.lower() in lower
     tenure_months = infer_tenure_months(text, result.company)
     in_vesting_window = bool(tenure_months and 39 <= tenure_months <= 60)
@@ -505,35 +591,36 @@ def score_result(result: SearchResult) -> Candidate | None:
     if not (transition_signal or in_vesting_window):
         return None
 
-    score = 20
     signal_types = ["Top Source Company"]
-
-    score += result.company_tier * 8
     if transition_signal:
-        score += 18
         signal_types.append("Founder Language")
-    if has_role_signal:
-        score += 14
-    if has_company_signal:
-        score += 5
     promotion_hits = sum(1 for term in PROMOTION_TERMS if term in lower)
     if promotion_hits >= 2:
-        score += 8
         promotion_signal = "High"
         signal_types.append("Fast Promotions")
     elif promotion_hits == 1:
-        score += 4
         promotion_signal = "Medium"
     else:
         promotion_signal = "Unknown"
     if any(term in lower for term in ["left", "former", "ex-"]):
-        score += 10
         signal_types.append("Recent Departure")
     if in_vesting_window:
-        score += 20
         signal_types.append("Vesting Window")
     elif tenure_months and tenure_months < 39 and not transition_signal:
         return None
+
+    evidence = f"{result.snippet} Source query: {result.query}. Evidence URL: {result.url}"
+    score_text = f"{text} {evidence}"
+    score = founder_score(
+        ScoreInput(
+            function=function,
+            signal_types=signal_types,
+            tenure_months=tenure_months,
+            promotion_signal=promotion_signal,
+            evidence_text=score_text,
+            company_tier=result.company_tier,
+        )
+    )
 
     current_founder_months = infer_current_founder_months(text)
     if current_founder_months:
@@ -554,16 +641,10 @@ def score_result(result: SearchResult) -> Candidate | None:
     score = max(0, min(score, 100))
     if score < 55:
         return None
-    if score >= 80:
-        confidence = "High"
-    elif score >= 65:
-        confidence = "Medium"
-    else:
-        confidence = "Low"
+    confidence = confidence_for_score(score)
 
     source = "LinkedIn" if "linkedin.com/in" in result.url else result.source
     title = infer_title(text)
-    evidence = f"{result.snippet} Source query: {result.query}. Evidence URL: {result.url}"
 
     return Candidate(
         name=infer_name(result.title),
@@ -608,6 +689,54 @@ def notion_text(value: str) -> dict:
     return {"rich_text": [{"text": {"content": value[:2000]}}]} if value else {"rich_text": []}
 
 
+def notion_plain_text(prop: dict) -> str:
+    if prop.get("type") == "title":
+        return normalize_text(" ".join(item.get("plain_text", "") for item in prop.get("title", [])))
+    if prop.get("type") == "rich_text":
+        return normalize_text(" ".join(item.get("plain_text", "") for item in prop.get("rich_text", [])))
+    return ""
+
+
+def notion_select_name(prop: dict) -> str:
+    selected = prop.get("select")
+    return selected.get("name", "") if selected else ""
+
+
+def notion_multi_select_names(prop: dict) -> list[str]:
+    return [item.get("name", "") for item in prop.get("multi_select", []) if item.get("name")]
+
+
+def notion_number(prop: dict) -> int | None:
+    value = prop.get("number")
+    return int(value) if value is not None else None
+
+
+def notion_page_score_input(page: dict) -> ScoreInput:
+    properties = page.get("properties", {})
+    evidence_parts = [
+        notion_plain_text(properties.get("Name", {})),
+        notion_plain_text(properties.get("Current Company", {})),
+        notion_plain_text(properties.get("Current Title", {})),
+        notion_plain_text(properties.get("Evidence", {})),
+    ]
+    return ScoreInput(
+        function=notion_select_name(properties.get("Function", {})),
+        signal_types=notion_multi_select_names(properties.get("Signal Type", {})),
+        tenure_months=notion_number(properties.get("Tenure Months", {})),
+        promotion_signal=notion_select_name(properties.get("Promotion Signal", {})),
+        evidence_text=" ".join(part for part in evidence_parts if part),
+        status=notion_select_name(properties.get("Status", {})),
+    )
+
+
+def notion_score_properties(score: int) -> dict:
+    return {
+        "Score": {"number": score},
+        "Confidence": {"select": {"name": confidence_for_score(score)}},
+        "Last Checked": {"date": {"start": dt.date.today().isoformat()}},
+    }
+
+
 def notion_candidate_properties(candidate: Candidate, *, include_status: bool) -> dict:
     properties = {
         "Name": {"title": [{"text": {"content": candidate.name}}]},
@@ -628,6 +757,16 @@ def notion_candidate_properties(candidate: Candidate, *, include_status: bool) -
     if candidate.tenure_months is not None:
         properties["Tenure Months"] = {"number": candidate.tenure_months}
     return properties
+
+
+def get_notion_page(page_id: str) -> dict:
+    status, text = fetch_url(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        headers=notion_headers(),
+    )
+    if status not in (200, 201):
+        raise RuntimeError(f"Notion page read failed status={status}: {text}")
+    return json.loads(text)
 
 
 def find_notion_page_by_linkedin_url(linkedin_url: str) -> str | None:
@@ -686,6 +825,10 @@ def write_candidate_to_notion(candidate: Candidate) -> str:
     existing_page_id = find_notion_page_by_linkedin_url(candidate.linkedin_url)
     properties = notion_candidate_properties(candidate, include_status=not bool(existing_page_id))
     if existing_page_id:
+        existing_page = get_notion_page(existing_page_id)
+        existing_status = notion_select_name(existing_page.get("properties", {}).get("Status", {}))
+        if existing_status == REJECTED_STATUS:
+            properties.update(notion_score_properties(0))
         status, text = fetch_url(
             f"https://api.notion.com/v1/pages/{existing_page_id}",
             method="PATCH",
@@ -709,15 +852,71 @@ def update_status_by_linkedin_url(linkedin_url: str, status_name: str) -> bool:
         page_id = find_notion_page_by_linkedin_url(canonical_url(linkedin_url) + "/")
     if not page_id:
         return False
+    properties = {"Status": {"select": {"name": status_name}}}
+    if status_name == REJECTED_STATUS:
+        properties.update(notion_score_properties(0))
     status, text = fetch_url(
         f"https://api.notion.com/v1/pages/{page_id}",
         method="PATCH",
-        body={"properties": {"Status": {"select": {"name": status_name}}}},
+        body={"properties": properties},
         headers=notion_headers(),
     )
     if status not in (200, 201):
         raise RuntimeError(f"Notion status update failed status={status}: {text}")
     return True
+
+
+def load_notion_pages() -> list[dict]:
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    pages = []
+    body: dict = {"page_size": 100}
+    while True:
+        status, text = fetch_url(
+            f"https://api.notion.com/v1/databases/{database_id}/query",
+            method="POST",
+            body=body,
+            headers=notion_headers(),
+        )
+        if status not in (200, 201):
+            raise RuntimeError(f"Notion query failed status={status}: {text}")
+        payload = json.loads(text)
+        pages.extend(payload.get("results", []))
+        if not payload.get("has_more"):
+            return pages
+        body["start_cursor"] = payload["next_cursor"]
+
+
+def rescore_notion_database(*, apply: bool) -> list[dict]:
+    changes = []
+    for page in load_notion_pages():
+        properties = page.get("properties", {})
+        score_input = notion_page_score_input(page)
+        new_score = founder_score(score_input)
+        old_score = notion_number(properties.get("Score", {}))
+        old_confidence = notion_select_name(properties.get("Confidence", {}))
+        new_confidence = confidence_for_score(new_score)
+        name = notion_plain_text(properties.get("Name", {})) or page["id"]
+        change = {
+            "page_id": page["id"],
+            "name": name,
+            "status": score_input.status,
+            "old_score": old_score,
+            "new_score": new_score,
+            "old_confidence": old_confidence,
+            "new_confidence": new_confidence,
+            "changed": old_score != new_score or old_confidence != new_confidence,
+        }
+        changes.append(change)
+        if apply and change["changed"]:
+            status, text = fetch_url(
+                f"https://api.notion.com/v1/pages/{page['id']}",
+                method="PATCH",
+                body={"properties": notion_score_properties(new_score)},
+                headers=notion_headers(),
+            )
+            if status not in (200, 201):
+                raise RuntimeError(f"Notion rescore update failed status={status}: {text}")
+    return changes
 
 
 def discover(limit: int, per_company: int, provider: str, verbose: bool, excluded_urls: set[str] | None = None) -> list[Candidate]:
@@ -769,7 +968,25 @@ def main() -> int:
     parser.add_argument("--output-json")
     parser.add_argument("--skip-existing-notion", action="store_true")
     parser.add_argument("--set-status", nargs=2, metavar=("LINKEDIN_URL", "STATUS"))
+    parser.add_argument("--rescore-notion", action="store_true")
+    parser.add_argument("--apply-rescore", action="store_true")
     args = parser.parse_args()
+
+    if args.rescore_notion:
+        missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError(f"missing env values: {', '.join(missing)}")
+        changes = rescore_notion_database(apply=args.apply_rescore)
+        changed_count = sum(1 for change in changes if change["changed"])
+        rejected_zeroed = sum(
+            1
+            for change in changes
+            if change["status"] == REJECTED_STATUS and change["new_score"] == 0 and change["old_score"] != 0
+        )
+        print(json.dumps(changes, indent=2))
+        mode = "applied" if args.apply_rescore else "dry run"
+        print(f"Notion rescore {mode}: rows={len(changes)} changed={changed_count} rejected_zeroed={rejected_zeroed}.")
+        return 0
 
     if args.set_status:
         missing = [key for key in ("NOTION_TOKEN", "NOTION_DATABASE_ID") if not os.environ.get(key)]
