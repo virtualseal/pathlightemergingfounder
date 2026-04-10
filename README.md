@@ -72,7 +72,13 @@ Listen for Slack emoji reactions and update the Notion `Status`:
 npm run slack:listen
 ```
 
-By default, `:white_check_mark:` sets `Status` to `Approved`, and `:red_circle:` sets `Status` to `Rejected`. Override those with:
+Before using Slack rejection reasons, make sure the Notion review fields exist:
+
+```bash
+python3 founder_scan.py --ensure-review-fields
+```
+
+By default, `:white_check_mark:` sets `Status` to `Approved`, and `:red_circle:` sets `Status` to `Rejected`. After a rejection, the Slack bot replies in-thread with a rejection reason picklist and writes the selected reason to Notion. Override the status and emoji names with:
 
 ```env
 NOTION_APPROVE_STATUS=Approved
